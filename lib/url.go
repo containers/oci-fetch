@@ -19,6 +19,10 @@ import (
 	"strings"
 )
 
+var (
+	ErrInvalidImageName = fmt.Errorf("failed to parse image name")
+)
+
 const defaultVersion = "latest"
 
 type URL struct {
@@ -27,8 +31,13 @@ type URL struct {
 	Version string
 }
 
-func NewURL(url string) *URL {
+func NewURL(url string) (*URL, error) {
 	tokens := strings.Split(url, "/")
+	if len(tokens) <= 1 {
+		return nil, ErrInvalidImageName
+	}
+	host := tokens[0]
+	name := strings.Join(tokens[1:], "/")
 	version := defaultVersion
 	if strings.Contains(tokens[len(tokens)-1], ":") {
 		lastToken := tokens[len(tokens)-1]
@@ -36,15 +45,13 @@ func NewURL(url string) *URL {
 		version = lastToken[colonIndex+1:]
 		tokens[len(tokens)-1] = lastToken[:colonIndex]
 	}
-	host := tokens[0]
-	var name string
-	if len(tokens) > 1 {
-		name = strings.Join(tokens[1:], "/")
-	}
-	fmt.Printf("New URL:\n    Host: %s\n    Name: %s\n    Version: %s\n", host, name, version)
 	return &URL{
 		Host:    host,
 		Name:    name,
 		Version: version,
-	}
+	}, nil
+}
+
+func (u *URL) String() string {
+	return fmt.Sprintf("%s/%s:%s", u.Host, u.Name, u.Version)
 }

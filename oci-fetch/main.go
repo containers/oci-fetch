@@ -19,14 +19,49 @@ import (
 	"os"
 
 	"github.com/opencontainers/oci-fetch/lib"
+	"github.com/spf13/cobra"
 )
 
-func main() {
-	u := lib.NewURL(os.Args[1])
+var (
+	flagDebug                       bool
+	flagInsecureAllowHTTP           bool
+	flagInsecureSkipTLSVerification bool
+	cmdOCIFetch                     = &cobra.Command{
+		Use:     "oci-fetch HOST/IMAGENAME[:TAG]",
+		Short:   "an OCI-compliant image fetcher",
+		Example: "oci-fetch registry-1.docker.io/library/nginx:latest",
+		Run:     runOCIFetch,
+	}
+)
 
-	of := lib.NewOCIFetcher("", "", false, false)
-	err := of.Fetch(u, "test")
+func init() {
+	cmdOCIFetch.PersistentFlags().BoolVar(&flagDebug, "debug", false, "print out debugging information to stderr")
+	cmdOCIFetch.PersistentFlags().BoolVar(&flagInsecureAllowHTTP, "insecure-allow-http", false, "don't enforce encryption when fetching images")
+	cmdOCIFetch.PersistentFlags().BoolVar(&flagInsecureSkipTLSVerification, "insecure-skip-tls-verification", false, "don't perform TLS certificate verification")
+}
+
+func main() {
+	err := cmdOCIFetch.Execute()
 	if err != nil {
-		fmt.Printf("%v\n", err)
+		fmt.Fprintf(os.Stderr, "%v", err)
+		os.Exit(1)
+	}
+}
+
+func runOCIFetch(cmd *cobra.Command, args []string) {
+	if len(args) != 1 {
+		cmd.Usage()
+		os.Exit(1)
+	}
+	u, err := lib.NewURL(args[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v", err)
+		os.Exit(1)
+	}
+	of := lib.NewOCIFetcher("", "", flagInsecureAllowHTTP, flagInsecureSkipTLSVerification, flagDebug)
+	err = of.Fetch(u, "output")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v", err)
+		os.Exit(1)
 	}
 }

@@ -34,27 +34,39 @@ type OCIFetcher struct {
 	hostsV2AuthTokens           map[string]map[string]string
 	insecureAllowHTTP           bool
 	insecureSkipTLSVerification bool
+	debug                       bool
 }
 
-func NewOCIFetcher(username, password string, insecureAllowHTTP, insecureSkipTLSVerification bool) *OCIFetcher {
+func NewOCIFetcher(username, password string, insecureAllowHTTP, insecureSkipTLSVerification, debug bool) *OCIFetcher {
 	return &OCIFetcher{
 		username:                    username,
 		password:                    password,
 		hostsV2AuthTokens:           make(map[string]map[string]string),
 		insecureAllowHTTP:           insecureAllowHTTP,
 		insecureSkipTLSVerification: insecureSkipTLSVerification,
+		debug: debug,
+	}
+}
+
+func (of *OCIFetcher) debugMsg(format string, a ...interface{}) {
+	if of.debug {
+		out := fmt.Sprintf(format, a...)
+		fmt.Fprintln(os.Stderr, strings.TrimSuffix(out, "\n"))
 	}
 }
 
 func (of *OCIFetcher) Fetch(u *URL, outputDir string) error {
+	of.debugMsg("fetching OCI image %q", u.String())
 	manifest, err := of.fetchManifest(u)
 	if err != nil {
 		return err
 	}
+	of.debugMsg("manifest successfully retrieved")
 	config, err := of.fetchConfig(u, manifest.Config.Digest, manifest.Config.Size)
 	if err != nil {
 		return err
 	}
+	of.debugMsg("config successfully retrieved")
 	var doneChans []chan error
 	for _, layer := range manifest.Layers {
 		layer := layer
@@ -69,28 +81,29 @@ func (of *OCIFetcher) Fetch(u *URL, outputDir string) error {
 			return err
 		}
 	}
+	of.debugMsg("layers successfully retrieved")
 
-	manblob, err := json.Marshal(manifest)
+	err = writeJSONToFile(path.Join(outputDir, "manifest.json"), manifest)
 	if err != nil {
 		return err
 	}
-	err = ioutil.WriteFile(path.Join(outputDir, "manifest.json"), manblob, 0644)
-	if err != nil {
-		return err
-	}
-	confblob, err := json.Marshal(config)
-	if err != nil {
-		return err
-	}
-	err = ioutil.WriteFile(path.Join(outputDir, manifest.Config.Digest+".json"), confblob, 0644)
+	err = writeJSONToFile(path.Join(outputDir, manifest.Config.Digest+".json"), config)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
+func writeJSONToFile(path string, data interface{}) error {
+	blob, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return ioutil.WriteFile(path, blob, 0644)
+}
+
 func (of *OCIFetcher) fetchManifest(u *URL) (*schema.ImageManifest, error) {
-	stringURL := "http://" + path.Join(u.Host, "v2", u.Name, "manifests", u.Version)
+	stringURL := "https://" + path.Join(u.Host, "v2", u.Name, "manifests", u.Version)
 
 	req, err := http.NewRequest("GET", stringURL, nil)
 	if err != nil {
@@ -221,7 +234,7 @@ func (of *OCIFetcher) makeRequest(req *http.Request, repo string, mediaType stri
 
 	req.Header.Set("Accept", mediaType)
 
-	fmt.Printf("Sending request to: %s\n", req.URL.String())
+	of.debugMsg("making request to: %s", req.URL.String())
 
 	client := GetTLSClient(of.insecureSkipTLSVerification)
 	res, err := client.Do(req)
@@ -230,23 +243,27 @@ func (of *OCIFetcher) makeRequest(req *http.Request, repo string, mediaType stri
 	}
 
 	if res.StatusCode == http.StatusUnauthorized && setBearerHeader {
-		return res, err
+		return res, nil
 	}
 
 	hdr := res.Header.Get("www-authenticate")
 	if res.StatusCode != http.StatusUnauthorized || hdr == "" {
-		return res, err
+		return res, nil
 	}
-	fmt.Println("www-authenticate: " + hdr)
 
-	fmt.Println("getting bearer token")
+	of.debugMsg("need to get auth token: %s", hdr)
 
-	tokens := strings.Split(hdr, ",")
+	of.acquireAuthToken(client, hdr, repo, req.URL.Host)
+
+	return of.makeRequest(req, repo, mediaType)
+}
+
+func (of *OCIFetcher) acquireAuthToken(client *http.Client, wwwAuthenticate, repo, registryHost string) error {
+	tokens := strings.Split(wwwAuthenticate, ",")
 	if len(tokens) != 3 ||
 		!strings.HasPrefix(strings.ToLower(tokens[0]), "bearer realm") {
-		return res, err
+		return fmt.Errorf("couldn't parse WWW-Authenticate header: %q", wwwAuthenticate)
 	}
-	res.Body.Close()
 
 	var realm, service, scope string
 	for _, token := range tokens {
@@ -262,10 +279,10 @@ func (of *OCIFetcher) makeRequest(req *http.Request, repo string, mediaType stri
 	}
 
 	if realm == "" {
-		return nil, fmt.Errorf("missing realm in bearer auth challenge")
+		return fmt.Errorf("missing realm in bearer auth challenge")
 	}
 	if service == "" {
-		return nil, fmt.Errorf("missing service in bearer auth challenge")
+		return fmt.Errorf("missing service in bearer auth challenge")
 	}
 	// The scope can be empty if we're not getting a token for a specific repo
 	if scope == "" && repo != "" {
@@ -275,7 +292,7 @@ func (of *OCIFetcher) makeRequest(req *http.Request, repo string, mediaType stri
 
 	authReq, err := http.NewRequest("GET", realm, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	getParams := authReq.URL.Query()
@@ -287,24 +304,26 @@ func (of *OCIFetcher) makeRequest(req *http.Request, repo string, mediaType stri
 
 	of.setBasicAuth(authReq)
 
-	res, err = client.Do(authReq)
+	of.debugMsg("requesting auth token with: ", authReq.URL.String())
+
+	res, err := client.Do(authReq)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer res.Body.Close()
 
 	switch res.StatusCode {
 	case http.StatusUnauthorized:
-		return nil, fmt.Errorf("unable to retrieve auth token: 401 unauthorized")
+		return fmt.Errorf("unable to retrieve auth token: 401 unauthorized")
 	case http.StatusOK:
 		break
 	default:
-		return nil, fmt.Errorf("unexpected http code: %d, URL: %s", res.StatusCode, authReq.URL)
+		return fmt.Errorf("unexpected http code: %d, URL: %s", res.StatusCode, authReq.URL)
 	}
 
 	tokenBlob, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	tokenStruct := struct {
@@ -313,19 +332,20 @@ func (of *OCIFetcher) makeRequest(req *http.Request, repo string, mediaType stri
 
 	err = json.Unmarshal(tokenBlob, &tokenStruct)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	hostAuthTokens, ok = of.hostsV2AuthTokens[req.URL.Host]
+	hostAuthTokens, ok := of.hostsV2AuthTokens[registryHost]
 	if !ok {
 		hostAuthTokens = make(map[string]string)
-		of.hostsV2AuthTokens[req.URL.Host] = hostAuthTokens
+		of.hostsV2AuthTokens[registryHost] = hostAuthTokens
 	}
 
 	hostAuthTokens[repo] = tokenStruct.Token
-	fmt.Println("host auth token acquired")
 
-	return of.makeRequest(req, repo, mediaType)
+	of.debugMsg("successfully retrieved auth token")
+
+	return nil
 }
 
 func (of *OCIFetcher) setBasicAuth(req *http.Request) {
