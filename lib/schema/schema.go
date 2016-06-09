@@ -19,14 +19,6 @@ import (
 	"errors"
 )
 
-const (
-	MediaTypeManifestList = "application/vnd.oci.image.manifest.list.v1+json"
-	MediaTypeManifest     = "application/vnd.oci.image.manifest.v1+json"
-	MediaTypeRootFS       = "application/vnd.oci.image.serialization.rootfs.tar.gzip"
-	MediaTypeConfig       = "application/vnd.oci.image.serialization.config.v1+json"
-	MediaTypeCombined     = "application/vnd.oci.image.serialization.combined.v1+json"
-)
-
 var (
 	ErrIncorrectMediaType = errors.New("incorrect mediaType")
 	ErrMissingConfig      = errors.New("the config field is empty")

@@ -15,16 +15,21 @@
 package lib
 
 import (
+	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/coreos/pkg/progressutil"
 	"github.com/opencontainers/oci-fetch/lib/schema"
 )
 
@@ -55,8 +60,21 @@ func (of *OCIFetcher) debugMsg(format string, a ...interface{}) {
 	}
 }
 
+func blobsDir(outputDir string) string {
+	return path.Join(outputDir, "blobs")
+}
+
+func blobFile(outputDir string, digest string) string {
+	formattedDigest := strings.Replace(digest, ":", "-", -1)
+	return path.Join(blobsDir(outputDir), formattedDigest)
+}
+
+func refsDir(outputDir string) string {
+	return path.Join(outputDir, "refs")
+}
+
 func (of *OCIFetcher) Fetch(u *URL, outputDir string) error {
-	of.debugMsg("fetching OCI image %q", u.String())
+	of.debugMsg("fetching OCI image host:%s, name:%s, tag:%s", u.Host, u.Name, u.Version)
 	manifest, err := of.fetchManifest(u)
 	if err != nil {
 		return err
@@ -67,31 +85,77 @@ func (of *OCIFetcher) Fetch(u *URL, outputDir string) error {
 		return err
 	}
 	of.debugMsg("config successfully retrieved")
+
+	cpp := &progressutil.CopyProgressPrinter{}
+	layers := removeDuplicateLayers(manifest.Layers)
+
 	var doneChans []chan error
-	for _, layer := range manifest.Layers {
+	var closerChans []chan []io.Closer
+	for _, layer := range layers {
 		layer := layer
 		doneChan := make(chan error, 1)
 		doneChans = append(doneChans, doneChan)
+		closerChan := make(chan []io.Closer, 1)
+		closerChans = append(closerChans, closerChan)
 		go func() {
-			doneChan <- of.fetchLayer(u, layer.Digest, layer.Size, outputDir)
+			closers, err := of.fetchLayer(u, layer.Digest, layer.Size, outputDir, cpp)
+			closerChan <- closers
+			doneChan <- err
 		}()
 	}
+	defer func() {
+		for _, closerChan := range closerChans {
+			closers := <-closerChan
+			for _, closer := range closers {
+				closer.Close()
+			}
+		}
+	}()
 	for _, doneChan := range doneChans {
 		if err := <-doneChan; err != nil {
 			return err
 		}
 	}
-	of.debugMsg("layers successfully retrieved")
-
-	err = writeJSONToFile(path.Join(outputDir, "manifest.json"), manifest)
+	err = cpp.PrintAndWait(os.Stderr, time.Second, nil)
 	if err != nil {
 		return err
 	}
-	err = writeJSONToFile(path.Join(outputDir, manifest.Config.Digest+".json"), config)
+	of.debugMsg("layers successfully retrieved")
+
+	err = writeJSONToFile(path.Join(outputDir, "oci-layout"), schema.DefaultOCILayout)
+	if err != nil {
+		return err
+	}
+
+	err = os.MkdirAll(path.Join(outputDir, "refs"), 0755)
+	if err != nil {
+		return err
+	}
+	err = writeJSONToFile(path.Join(outputDir, "refs", u.Version), manifest)
+	if err != nil {
+		return err
+	}
+	err = writeBlobFromJSON(outputDir, manifest.Config.Digest, config)
 	if err != nil {
 		return err
 	}
 	return nil
+}
+
+func removeDuplicateLayers(layers []*schema.ImageManifestDigest) []*schema.ImageManifestDigest {
+	var uniqueLayers []*schema.ImageManifestDigest
+	for _, layer := range layers {
+		seen := false
+		for _, seenLayer := range uniqueLayers {
+			if seenLayer.Digest == layer.Digest {
+				seen = true
+			}
+		}
+		if !seen {
+			uniqueLayers = append(uniqueLayers, layer)
+		}
+	}
+	return uniqueLayers
 }
 
 func writeJSONToFile(path string, data interface{}) error {
@@ -134,13 +198,11 @@ func (of *OCIFetcher) fetchManifest(u *URL) (*schema.ImageManifest, error) {
 		return nil, err
 	}
 
-	fmt.Printf("Parsed manifest: %s\n", manifest.PrettyString())
-
 	return manifest, manifest.Validate()
 }
 
 func (of *OCIFetcher) fetchConfig(u *URL, configDigest string, expectedSize int) (*schema.ImageConfig, error) {
-	stringURL := "http://" + path.Join(u.Host, "v2", u.Name, "blobs", configDigest)
+	stringURL := "https://" + path.Join(u.Host, "v2", u.Name, "blobs", configDigest)
 
 	req, err := http.NewRequest("GET", stringURL, nil)
 	if err != nil {
@@ -164,8 +226,6 @@ func (of *OCIFetcher) fetchConfig(u *URL, configDigest string, expectedSize int)
 		return nil, err
 	}
 
-	fmt.Printf("Unparsed config: %s\n", string(confblob))
-
 	if len(confblob) != expectedSize {
 		return nil, fmt.Errorf("retrieved image config didn't match expected size, expected=%d actual=%d", expectedSize, len(confblob))
 	}
@@ -179,44 +239,80 @@ func (of *OCIFetcher) fetchConfig(u *URL, configDigest string, expectedSize int)
 
 	return config, nil
 }
-func (of *OCIFetcher) fetchLayer(u *URL, layerDigest string, expectedSize int, outputDir string) error {
-	stringURL := "http://" + path.Join(u.Host, "v2", u.Name, "blobs", layerDigest)
+func (of *OCIFetcher) fetchLayer(u *URL, layerDigest string, expectedSize int, outputDir string, cpp *progressutil.CopyProgressPrinter) ([]io.Closer, error) {
+	stringURL := "https://" + path.Join(u.Host, "v2", u.Name, "blobs", layerDigest)
+
+	var closers []io.Closer
 
 	req, err := http.NewRequest("GET", stringURL, nil)
 	if err != nil {
-		return err
+		return closers, err
 	}
 
 	of.setBasicAuth(req)
 
 	res, err := of.makeRequest(req, u.Name, schema.MediaTypeRootFS)
 	if err != nil {
-		return err
+		return closers, err
 	}
-	defer res.Body.Close()
+	closers = append(closers, res.Body)
 
 	if res.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected http code: %d, URL: %s", res.StatusCode, req.URL)
+		return closers, fmt.Errorf("unexpected http code: %d, URL: %s", res.StatusCode, req.URL)
 	}
 
-	err = os.MkdirAll(path.Join(outputDir, layerDigest), 0755)
+	err = os.MkdirAll(blobsDir(outputDir), 0755)
+	if err != nil {
+		return closers, err
+	}
+
+	f, err := os.Create(blobFile(outputDir, layerDigest))
+	if err != nil {
+		return closers, err
+	}
+	closers = append(closers, f)
+
+	name := strings.TrimPrefix(layerDigest, "sha256:")
+	if len(name) > 12 {
+		name = name[:12]
+	}
+
+	size, err := strconv.ParseInt(res.Header.Get("content-length"), 10, 64)
+	if err != nil {
+		size = 0
+	}
+
+	cpp.AddCopy(res.Body, name, size, f)
+
+	return closers, nil
+}
+
+func writeBlobFromJSON(outputDir, digest string, data interface{}) error {
+	jsonblob, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	f, err := os.Create(path.Join(outputDir, layerDigest, "layer.tar"))
+	buffer := bytes.NewBuffer(jsonblob)
+	_, err = writeBlob(outputDir, digest, buffer)
 	if err != nil {
 		return err
 	}
-	size, err := io.Copy(f, res.Body)
-	if err != nil {
-		return err
-	}
-
-	if size != int64(expectedSize) {
-		return fmt.Errorf("retrieved image layer didn't match expected size, expected=%d actual=%d", expectedSize, size)
-	}
-
 	return nil
+}
+
+func writeBlob(outputDir, digest string, blob io.Reader) (int64, error) {
+	err := os.MkdirAll(blobsDir(outputDir), 0755)
+	if err != nil {
+		return 0, err
+	}
+
+	f, err := os.Create(blobFile(outputDir, digest))
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	return io.Copy(f, blob)
 }
 
 func (of *OCIFetcher) makeRequest(req *http.Request, repo string, mediaType string) (*http.Response, error) {
@@ -225,8 +321,6 @@ func (of *OCIFetcher) makeRequest(req *http.Request, repo string, mediaType stri
 	if ok {
 		authToken, ok := hostAuthTokens[repo]
 		if ok {
-			fmt.Println("setting bearer token on request")
-			fmt.Println("Bearer " + authToken)
 			req.Header.Set("Authorization", "Bearer "+authToken)
 			setBearerHeader = true
 		}
@@ -239,7 +333,15 @@ func (of *OCIFetcher) makeRequest(req *http.Request, repo string, mediaType stri
 	client := GetTLSClient(of.insecureSkipTLSVerification)
 	res, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		if urlErr, ok := err.(*url.Error); ok && of.insecureAllowHTTP && urlErr.Err.Error() == "http: server gave HTTP response to HTTPS client" {
+			req.URL.Scheme = "http"
+			res, err = client.Do(req)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 
 	if res.StatusCode == http.StatusUnauthorized && setBearerHeader {
@@ -256,102 +358,6 @@ func (of *OCIFetcher) makeRequest(req *http.Request, repo string, mediaType stri
 	of.acquireAuthToken(client, hdr, repo, req.URL.Host)
 
 	return of.makeRequest(req, repo, mediaType)
-}
-
-func (of *OCIFetcher) acquireAuthToken(client *http.Client, wwwAuthenticate, repo, registryHost string) error {
-	tokens := strings.Split(wwwAuthenticate, ",")
-	if len(tokens) != 3 ||
-		!strings.HasPrefix(strings.ToLower(tokens[0]), "bearer realm") {
-		return fmt.Errorf("couldn't parse WWW-Authenticate header: %q", wwwAuthenticate)
-	}
-
-	var realm, service, scope string
-	for _, token := range tokens {
-		if strings.HasPrefix(strings.ToLower(token), "bearer realm") {
-			realm = strings.Trim(token[len("bearer realm="):], "\"")
-		}
-		if strings.HasPrefix(token, "service") {
-			service = strings.Trim(token[len("service="):], "\"")
-		}
-		if strings.HasPrefix(token, "scope") {
-			scope = strings.Trim(token[len("scope="):], "\"")
-		}
-	}
-
-	if realm == "" {
-		return fmt.Errorf("missing realm in bearer auth challenge")
-	}
-	if service == "" {
-		return fmt.Errorf("missing service in bearer auth challenge")
-	}
-	// The scope can be empty if we're not getting a token for a specific repo
-	if scope == "" && repo != "" {
-		// If the scope is empty and it shouldn't be, we can infer it based on the repo
-		scope = fmt.Sprintf("repository:%s:pull", repo)
-	}
-
-	authReq, err := http.NewRequest("GET", realm, nil)
-	if err != nil {
-		return err
-	}
-
-	getParams := authReq.URL.Query()
-	getParams.Add("service", service)
-	if scope != "" {
-		getParams.Add("scope", scope)
-	}
-	authReq.URL.RawQuery = getParams.Encode()
-
-	of.setBasicAuth(authReq)
-
-	of.debugMsg("requesting auth token with: ", authReq.URL.String())
-
-	res, err := client.Do(authReq)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-
-	switch res.StatusCode {
-	case http.StatusUnauthorized:
-		return fmt.Errorf("unable to retrieve auth token: 401 unauthorized")
-	case http.StatusOK:
-		break
-	default:
-		return fmt.Errorf("unexpected http code: %d, URL: %s", res.StatusCode, authReq.URL)
-	}
-
-	tokenBlob, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return err
-	}
-
-	tokenStruct := struct {
-		Token string `json:"token"`
-	}{}
-
-	err = json.Unmarshal(tokenBlob, &tokenStruct)
-	if err != nil {
-		return err
-	}
-
-	hostAuthTokens, ok := of.hostsV2AuthTokens[registryHost]
-	if !ok {
-		hostAuthTokens = make(map[string]string)
-		of.hostsV2AuthTokens[registryHost] = hostAuthTokens
-	}
-
-	hostAuthTokens[repo] = tokenStruct.Token
-
-	of.debugMsg("successfully retrieved auth token")
-
-	return nil
-}
-
-func (of *OCIFetcher) setBasicAuth(req *http.Request) {
-	if of.username != "" && of.password != "" {
-		req.SetBasicAuth(of.username, of.password)
-	}
 }
 
 // GetTLSClient gets an HTTP client that behaves like the default HTTP

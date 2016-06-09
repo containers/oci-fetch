@@ -43,7 +43,7 @@ func init() {
 func main() {
 	err := cmdOCIFetch.Execute()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v", err)
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
 }
@@ -55,13 +55,13 @@ func runOCIFetch(cmd *cobra.Command, args []string) {
 	}
 	u, err := lib.NewURL(args[0])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v", err)
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
 	of := lib.NewOCIFetcher("", "", flagInsecureAllowHTTP, flagInsecureSkipTLSVerification, flagDebug)
 	err = of.Fetch(u, "output")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v", err)
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
 }

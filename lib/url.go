@@ -36,8 +36,6 @@ func NewURL(url string) (*URL, error) {
 	if len(tokens) <= 1 {
 		return nil, ErrInvalidImageName
 	}
-	host := tokens[0]
-	name := strings.Join(tokens[1:], "/")
 	version := defaultVersion
 	if strings.Contains(tokens[len(tokens)-1], ":") {
 		lastToken := tokens[len(tokens)-1]
@@ -45,6 +43,8 @@ func NewURL(url string) (*URL, error) {
 		version = lastToken[colonIndex+1:]
 		tokens[len(tokens)-1] = lastToken[:colonIndex]
 	}
+	host := tokens[0]
+	name := strings.Join(tokens[1:], "/")
 	return &URL{
 		Host:    host,
 		Name:    name,
