@@ -15,11 +15,18 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/spf13/cobra"
 
 	"github.com/opencontainers/oci-fetch/lib"
-	"github.com/spf13/cobra"
 )
 
 var (
@@ -27,9 +34,10 @@ var (
 	flagInsecureAllowHTTP           bool
 	flagInsecureSkipTLSVerification bool
 	cmdOCIFetch                     = &cobra.Command{
-		Use:     "oci-fetch HOST/IMAGENAME[:TAG]",
+		Use:     "oci-fetch HOST/IMAGENAME[:TAG] FILEPATH",
 		Short:   "an OCI-compliant image fetcher",
-		Example: "oci-fetch registry-1.docker.io/library/nginx:latest",
+		Long:    "oci-fetch will fetch an OCI image and store it on the local filesystem in a .tar.gz file",
+		Example: "oci-fetch registry-1.docker.io/library/nginx:latest nginx.oci",
 		Run:     runOCIFetch,
 	}
 )
@@ -49,19 +57,78 @@ func main() {
 }
 
 func runOCIFetch(cmd *cobra.Command, args []string) {
-	if len(args) != 1 {
+	if len(args) != 2 {
 		cmd.Usage()
 		os.Exit(1)
 	}
+
+	outputFilePath := args[1]
+
 	u, err := lib.NewURL(args[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
-	of := lib.NewOCIFetcher("", "", flagInsecureAllowHTTP, flagInsecureSkipTLSVerification, flagDebug)
-	err = of.Fetch(u, "output")
+
+	tmpDir, err := ioutil.TempDir("", "oci-fetch")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	of := lib.NewOCIFetcher("", "", flagInsecureAllowHTTP, flagInsecureSkipTLSVerification, flagDebug)
+	err = of.Fetch(u, tmpDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	f, err := os.Create(outputFilePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	gw := gzip.NewWriter(f)
+	defer gw.Close()
+
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+
+	err = filepath.Walk(tmpDir, newWalkFn(tmpDir, tw))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+}
+
+func newWalkFn(parentDir string, tw *tar.Writer) filepath.WalkFunc {
+	return func(path string, info os.FileInfo, err error) error {
+		if info.IsDir() {
+			return nil
+		}
+		h, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		h.Name = strings.TrimPrefix(path, parentDir)
+		err = tw.WriteHeader(h)
+		if err != nil {
+			return err
+		}
+
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		_, err = io.Copy(tw, f)
+		if err != nil {
+			return err
+		}
+		return nil
 	}
 }

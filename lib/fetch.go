@@ -15,7 +15,6 @@
 package lib
 
 import (
-	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -33,6 +32,8 @@ import (
 	"github.com/opencontainers/oci-fetch/lib/schema"
 )
 
+// OCIFetcher is a struct that can be used to fetch OCI images from a remote
+// registry.
 type OCIFetcher struct {
 	username                    string
 	password                    string
@@ -42,6 +43,8 @@ type OCIFetcher struct {
 	debug                       bool
 }
 
+// NewOCIFetcher returns a new OCIFetcher, configured with the provided
+// arguments.
 func NewOCIFetcher(username, password string, insecureAllowHTTP, insecureSkipTLSVerification, debug bool) *OCIFetcher {
 	return &OCIFetcher{
 		username:                    username,
@@ -73,7 +76,9 @@ func refsDir(outputDir string) string {
 	return path.Join(outputDir, "refs")
 }
 
+// Fetch will download the image represented by u into outputDir.
 func (of *OCIFetcher) Fetch(u *URL, outputDir string) error {
+	// fetch the manifest and config
 	of.debugMsg("fetching OCI image host:%s, name:%s, tag:%s", u.Host, u.Name, u.Version)
 	manifest, err := of.fetchManifest(u)
 	if err != nil {
@@ -86,6 +91,18 @@ func (of *OCIFetcher) Fetch(u *URL, outputDir string) error {
 	}
 	of.debugMsg("config successfully retrieved")
 
+	// create the blobs and refs directories
+	err = os.MkdirAll(blobsDir(outputDir), 0755)
+	if err != nil {
+		return err
+	}
+	err = os.MkdirAll(refsDir(outputDir), 0755)
+	if err != nil {
+		return err
+	}
+
+	// download all of the layers into the blobs directory, displaying progress
+	// bars for the user
 	cpp := &progressutil.CopyProgressPrinter{}
 	layers := removeDuplicateLayers(manifest.Layers)
 
@@ -122,20 +139,20 @@ func (of *OCIFetcher) Fetch(u *URL, outputDir string) error {
 	}
 	of.debugMsg("layers successfully retrieved")
 
+	// Write the required oci-layout file
 	err = writeJSONToFile(path.Join(outputDir, "oci-layout"), schema.DefaultOCILayout)
 	if err != nil {
 		return err
 	}
 
-	err = os.MkdirAll(path.Join(outputDir, "refs"), 0755)
+	// Write the manifest into the refs folder
+	err = writeJSONToFile(path.Join(refsDir(outputDir), u.Version), manifest)
 	if err != nil {
 		return err
 	}
-	err = writeJSONToFile(path.Join(outputDir, "refs", u.Version), manifest)
-	if err != nil {
-		return err
-	}
-	err = writeBlobFromJSON(outputDir, manifest.Config.Digest, config)
+
+	// Write the config into the blobs folder
+	err = writeJSONToFile(blobFile(outputDir, manifest.Config.Digest), config)
 	if err != nil {
 		return err
 	}
@@ -261,11 +278,6 @@ func (of *OCIFetcher) fetchLayer(u *URL, layerDigest string, expectedSize int, o
 		return closers, fmt.Errorf("unexpected http code: %d, URL: %s", res.StatusCode, req.URL)
 	}
 
-	err = os.MkdirAll(blobsDir(outputDir), 0755)
-	if err != nil {
-		return closers, err
-	}
-
 	f, err := os.Create(blobFile(outputDir, layerDigest))
 	if err != nil {
 		return closers, err
@@ -285,34 +297,6 @@ func (of *OCIFetcher) fetchLayer(u *URL, layerDigest string, expectedSize int, o
 	cpp.AddCopy(res.Body, name, size, f)
 
 	return closers, nil
-}
-
-func writeBlobFromJSON(outputDir, digest string, data interface{}) error {
-	jsonblob, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-	buffer := bytes.NewBuffer(jsonblob)
-	_, err = writeBlob(outputDir, digest, buffer)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func writeBlob(outputDir, digest string, blob io.Reader) (int64, error) {
-	err := os.MkdirAll(blobsDir(outputDir), 0755)
-	if err != nil {
-		return 0, err
-	}
-
-	f, err := os.Create(blobFile(outputDir, digest))
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-
-	return io.Copy(f, blob)
 }
 
 func (of *OCIFetcher) makeRequest(req *http.Request, repo string, mediaType string) (*http.Response, error) {
