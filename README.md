@@ -1,6 +1,6 @@
 # oci-fetch
 
-This project implements fetching the [Open Container Initiative image format](https://github.com/opencontainers/image-spec) over the Docker registry API.
+Simple command line tool for fetching the [Open Container Initiative image format](https://github.com/opencontainers/image-spec) over various transports.
 
 ## Usage
 
@@ -19,6 +19,10 @@ Flags:
       --insecure-allow-http              don't enforce encryption when fetching images
       --insecure-skip-tls-verification   don't perform TLS certificate verification
 ```
+
+## Current Status
+
+oci-fetch can currently fetch OCI images from a [Docker v2 registry API](https://docs.docker.com/registry/spec/api/#pulling-an-image<Paste>).
 
 ## Future Roadmap
 
