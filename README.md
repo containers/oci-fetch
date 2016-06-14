@@ -8,10 +8,10 @@ Simple command line tool for fetching the [Open Container Initiative image forma
 $ go get github.com/containers/oci-fetch
 $ oci-fetch --help
 Usage:
-  oci-fetch HOST/IMAGENAME[:TAG] FILEPATH [flags]
+  oci-fetch docker://HOST/IMAGENAME[:TAG] FILEPATH [flags]
 
 Examples:
-oci-fetch registry-1.docker.io/library/nginx:latest nginx.oci
+oci-fetch docker://registry-1.docker.io/library/nginx:latest nginx.oci
 
 Flags:
       --debug                            print out debugging information to stderr

@@ -34,10 +34,10 @@ var (
 	flagInsecureAllowHTTP           bool
 	flagInsecureSkipTLSVerification bool
 	cmdOCIFetch                     = &cobra.Command{
-		Use:     "oci-fetch HOST/IMAGENAME[:TAG] FILEPATH",
-		Short:   "an OCI-compliant image fetcher",
+		Use:     "oci-fetch docker://HOST/IMAGENAME[:TAG] FILEPATH",
+		Short:   "an OCI image fetcher",
 		Long:    "oci-fetch will fetch an OCI image and store it on the local filesystem in a .tar.gz file",
-		Example: "oci-fetch registry-1.docker.io/library/nginx:latest nginx.oci",
+		Example: "oci-fetch docker://registry-1.docker.io/library/nginx:latest nginx.oci",
 		Run:     runOCIFetch,
 	}
 )

@@ -20,10 +20,14 @@ import (
 )
 
 var (
-	ErrInvalidImageName = fmt.Errorf("failed to parse image name")
+	ErrInvalidImageScheme = fmt.Errorf("only supported scheme is docker://")
+	ErrInvalidImageName   = fmt.Errorf("failed to parse image name")
 )
 
-const defaultVersion = "latest"
+const (
+	defaultVersion = "latest"
+	dockerScheme   = "docker://"
+)
 
 type URL struct {
 	Host    string
@@ -32,6 +36,12 @@ type URL struct {
 }
 
 func NewURL(url string) (*URL, error) {
+	idx := strings.Index(url, dockerScheme)
+	if idx != 0 {
+		return nil, ErrInvalidImageScheme
+	}
+	url = strings.TrimPrefix(url, dockerScheme)
+	strings.Split(url, "docker://")
 	tokens := strings.Split(url, "/")
 	if len(tokens) <= 1 {
 		return nil, ErrInvalidImageName
