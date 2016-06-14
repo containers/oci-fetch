@@ -28,8 +28,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/containers/oci-fetch/lib/schema"
 	"github.com/coreos/pkg/progressutil"
-	"github.com/opencontainers/oci-fetch/lib/schema"
 )
 
 // OCIFetcher is a struct that can be used to fetch OCI images from a remote
