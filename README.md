@@ -32,3 +32,8 @@ In the future we want to support additional transports such as:
 - http transport based on the OCI Image Layout but for HTTP paths
 - ftp transport based on the OCI Image Layout
 - Bittorrent transport based on gzipped tarball of OCI Image Layout
+
+## Contact
+
+- Mailing list: [containers-dev](https://groups.google.com/forum/?hl=en#!forum/containers-dev)
+- IRC: #[container-projects](irc://irc.freenode.org:6667/#container-projects) on freenode.org
