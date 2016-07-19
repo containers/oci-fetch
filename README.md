@@ -5,8 +5,11 @@ Simple command line tool for fetching the [Open Container Initiative image forma
 ## Usage
 
 ```
-$ go get github.com/containers/oci-fetch
+$ go get github.com/containers/oci-fetch/oci-fetch
 $ oci-fetch --help
+oci-fetch will fetch an OCI image and store it on the local filesystem in a
+.tar.gz file
+
 Usage:
   oci-fetch docker://HOST/IMAGENAME[:TAG] FILEPATH [flags]
 
