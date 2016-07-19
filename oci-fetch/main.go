@@ -58,7 +58,7 @@ func main() {
 
 func runOCIFetch(cmd *cobra.Command, args []string) {
 	if len(args) != 2 {
-		cmd.Usage()
+		fmt.Print(cmd.UsageString())
 		os.Exit(1)
 	}
 
